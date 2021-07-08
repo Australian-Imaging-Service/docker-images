@@ -1,9 +1,12 @@
-FROM python:2.7
-MAINTAINER John Flavin <jflavin@wustl.edu>
+FROM python:3.9
+LABEL maintainer=tom.g.close@gmail.com
+
+RUN mkdir /src
+
+COPY dcm2bids_wholeSession.py /src/dcm2bids_wholeSession.py
 
 RUN apt-get update && apt-get install -y \
         curl \
-        mercurial \
         pigz \
         zip \
         && \
@@ -13,18 +16,13 @@ RUN apt-get update && apt-get install -y \
         requests \
         && \
     rm -r ${HOME}/.cache/pip && \
-    curl -L https://github.com/rordenlab/dcm2niix/releases/download/v1.0.20180622/dcm2niix_27-Jun-2018_lnx.zip  > dcm2niix.zip && \
-    unzip dcm2niix.zip && \
+    curl -L https://github.com/rordenlab/dcm2niix/archive/refs/tags/v1.0.20210317.tar.gz  > dcm2niix.tar.gz && \
+    tar xzf dcm2niix.tar.gz && \
     mv dcm2niix /usr/local/bin && \
     chmod a+x /usr/local/bin/dcm2niix && \
     rm dcm* && \
-    mkdir /src && cd /src && \
-    hg clone https://bitbucket.org/nrg_customizations/nrg_pipeline_dicomtobids && \
-    cp nrg_pipeline_dicomtobids/scripts/catalog/DicomToBIDS/scripts/dcm2bids_wholeSession.py . && \
-    rm -r nrg_pipeline_dicomtobids && \
     apt-get remove -y \
         curl \
-        mercurial \
         zip \
         && \
     apt-get autoremove -y && \
