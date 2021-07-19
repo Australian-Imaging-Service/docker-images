@@ -1,0 +1,25 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: dcm2bids_wholeSession.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/dcm2bids-session/dcm2bids_wholeSession.py",
+            "args": [
+                "--session", "FTD0002",
+                "--host", "https://xnat.sydney.edu.au",
+                "--project", "FRONTIER",
+                "--user", "tclo7153",
+                "--pass", "sooLeih5",
+                "--upload-by-ref", "False",
+                "--dicomdir", "/Users/tclose/Data/xnat/dicom",
+                "--niftidir", "/Users/tclose/Data/xnat/nifti"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}

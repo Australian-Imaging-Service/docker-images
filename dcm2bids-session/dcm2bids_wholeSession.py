@@ -9,7 +9,7 @@ import subprocess
 import time
 import zipfile
 import tempfile
-import dicom as dicomLib
+import pydicom as dicomLib
 from shutil import copy as fileCopy
 from nipype.interfaces.dcm2nii import Dcm2nii
 from collections import OrderedDict
@@ -87,7 +87,7 @@ parser.add_argument("--user", help="CNDA username", required=True)
 parser.add_argument("--password", help="Password", required=True)
 parser.add_argument("--session", help="Session ID", required=True)
 parser.add_argument("--subject", help="Subject Label", required=False)
-parser.add_argument("--project", help="Project", required=False)
+parser.add_argument("--project", help="Project", required=True)
 parser.add_argument("--dicomdir", help="Root output directory for DICOM files", required=True)
 parser.add_argument("--niftidir", help="Root output directory for NIFTI files", required=True)
 parser.add_argument("--overwrite", help="Overwrite NIFTI files if they exist")
@@ -142,49 +142,48 @@ def get(url, **kwargs):
         sys.exit(1)
     return r
 
-if project is None or subject is None:
+if subject is None:
     # Get project ID and subject ID from session JSON
     print("Get project and subject ID for session ID %s." % session)
-    r = get(host + "/data/experiments/%s" % session, params={"format": "json", "handler": "values", "columns": "project,subject_ID"})
+    r = get(host + "/data/projects/%s/experiments/%s" % (project, session),
+            params={"format": "json", "handler": "values", "columns": "project,subject_ID"})
     sessionValuesJson = r.json()["ResultSet"]["Result"][0]
-    project = sessionValuesJson["project"] if project is None else project
     subjectID = sessionValuesJson["subject_ID"]
-    print("Project: " + project)
     print("Subject ID: " + subjectID)
 
     if subject is None:
         print()
         print("Get subject label for subject ID %s." % subjectID)
-        r = get(host + "/data/subjects/%s" % subjectID, params={"format": "json", "handler": "values", "columns": "label"})
+        r = get(host + "/data/projects/%s/subjects/%s" % (project, subjectID),
+                params={"format": "json", "handler": "values", "columns": "label"})
         subject = r.json()["ResultSet"]["Result"][0]["label"]
         print("Subject label: " + subject)
+
+session_url = (
+    f"{host}/data/projects/{project}/subjects/{subject}/experiments/{session}")
 
 # Get list of scan ids
 print()
 print("Get scan list for session ID %s." % session)
-r = get(host + "/data/experiments/%s/scans" % session, params={"format": "json"})
+r = get(session_url + "/scans", params={"format": "json"})
 scanRequestResultList = r.json()["ResultSet"]["Result"]
 scanIDList = [scan['ID'] for scan in scanRequestResultList]
-seriesDescList = [scan['series_description'] for scan in scanRequestResultList]  # { id: sd for (scan['ID'], scan['series_description']) in scanRequestResultList }
+scanTypeList = [scan['type'] for scan in scanRequestResultList]  # { id: sd for (scan['ID'], scan['series_description']) in scanRequestResultList }
 print('Found scans %s.' % ', '.join(scanIDList))
-print('Series descriptions %s' % ', '.join(seriesDescList))
-
-# Fall back on scan type if series description field is empty
-if set(seriesDescList) == set(['']):
-    seriesDescList = [scan['type'] for scan in scanRequestResultList]
-    print('Fell back to scan types %s' % ', '.join(seriesDescList))
+print('Scan types %s' % ', '.join(scanTypeList))
 
 # Get site- and project-level configs
-bidsmaplist = []
+bidsnamemap = {}
 print()
 print("Get site-wide BIDS map")
 # We don't use the convenience get() method because that throws exceptions when the object is not found.
 r = sess.get(host + "/data/config/bids/bidsmap", params={"contents": True})
 if r.ok:
     bidsmaptoadd = r.json()
-    for mapentry in bidsmaptoadd:
-        if mapentry not in bidsmaplist:
-            bidsmaplist.append(mapentry)
+    bidsnamemap.update(bidsmaptoadd)
+    # for mapentry in bidsmaptoadd:
+    #     if mapentry not in bidsmaplist:
+    #         bidsmaplist.append(mapentry)
 else:
     print("Could not read site-wide BIDS map")
 
@@ -192,28 +191,26 @@ print("Get project BIDS map if one exists")
 r = sess.get(host + "/data/projects/%s/config/bids/bidsmap" % project, params={"contents": True})
 if r.ok:
     bidsmaptoadd = r.json()
-    for mapentry in bidsmaptoadd:
-        if mapentry not in bidsmaplist:
-            bidsmaplist.append(mapentry)
+    bidsnamemap.update(bidsmaptoadd)
 else:
     print("Could not read project BIDS map")
 
-print("BIDS map: " + json.dumps(bidsmaplist))
+print("BIDS map: " + json.dumps(bidsnamemap))
 
 # Collapse human-readable JSON to dict for processing
-bidsnamemap = {x['series_description'].lower(): x['bidsname'] for x in bidsmaplist if 'series_description' in x and 'bidsname' in x}
+#bidsnamemap = {x['series_description'].lower(): x['bidsname'] for x in bidsmaplist if 'series_description' in x and 'bidsname' in x}
 
 # Map all series descriptions to BIDS names (case insensitive)
-resolved = [bidsnamemap[x.lower()] for x in seriesDescList if x.lower() in bidsnamemap]
+resolved = [bidsnamemap[x.lower()] for x in scanTypeList if x.lower() in bidsnamemap]
 
 # Count occurrences
 bidscount = collections.Counter(resolved)
 
 # Remove multiples
-multiples = {seriesdesc: count for seriesdesc, count in bidscount.items() if count > 1}
+multiples = {scantype: count for scantype, count in bidscount.items() if count > 1}
 
-# Cheat and reverse scanid and seriesdesc lists so numbering is in the right order
-for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
+# Cheat and reverse scanid and scantype lists so numbering is in the right order
+for scanid, scantype in zip(reversed(scanIDList), reversed(scanTypeList)):
     print()
     print('Beginning process for scan %s.' % scanid)
     os.chdir(builddir)
@@ -223,13 +220,13 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
     # BIDS subject name
     base = "sub-" + subject + "_"
 
-    if seriesdesc.lower() not in bidsnamemap:
-        print("Series " + seriesdesc + " not found in BIDSMAP")
+    if scantype not in bidsnamemap:
+        print("Series " + scantype + " not found in BIDSMAP")
         # bidsname = "Z"
         continue  # Exclude series from processing
     else:
-        print("Series " + seriesdesc + " matched " + bidsnamemap[seriesdesc.lower()])
-        match = bidsnamemap[seriesdesc.lower()]
+        print("Series " + scantype + " matched " + bidsnamemap[scantype])
+        match = bidsnamemap[scantype]
 
     # split before last _
     splitname = match.split("_")
@@ -250,7 +247,8 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
 
     # Get scan resources
     print("Get scan resources for scan %s." % scanid)
-    r = get(host + "/data/experiments/%s/scans/%s/resources" % (session, scanid), params={"format": "json"})
+    r = get(f"{session_url}/scans/{scanid}/resources",
+            params={"format": "json"})
     scanResources = r.json()["ResultSet"]["Result"]
     print('Found resources %s.' % ', '.join(res["label"] for res in scanResources))
 
@@ -323,7 +321,8 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
     if not usingDicom:
 
         print('Get IMA resource id for scan %s.' % scanid)
-        r = get(host + "/data/experiments/%s/scans/%s/resources" % (session, scanid), params={"format": "json"})
+        r = get(f"{session_url}/scans/{scanid}/resources",
+                params={"format": "json"})
         resourceDict = {resource['format']: resource['xnat_abstractresource_id'] for resource in r.json()["ResultSet"]["Result"]}
 
         if resourceDict["IMA"]:
@@ -335,9 +334,9 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
     print('Get list of DICOM files for scan %s.' % scanid)
 
     if usingDicom:
-        filesURL = host + "/data/experiments/%s/scans/%s/resources/DICOM/files" % (session, scanid)
+        filesURL = f"{session_url}/scans/{scanid}/resources/DICOM/files"
     elif resourceid is not None:
-        filesURL = host + "/data/experiments/%s/scans/%s/resources/%s/files" % (session, scanid, resourceid)
+        filesURL = f"{session_url}/scans/{scanid}/resources/{resourceid}/files"
     else:
         print("Trying to convert IMA files but there is no resource id available. Skipping.")
         continue
@@ -409,7 +408,7 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
 
     # Convert the differences
     bidsname = base + bidsname
-    print("Base " + base + " series " + seriesdesc + " match " + bidsname)
+    print("Base " + base + " series " + scantype + " match " + bidsname)
 
     print('Converting scan %s to NIFTI...' % scanid)
     # Do some stuff to execute dcm2niix as a subprocess
@@ -429,7 +428,7 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
             os.rename(files, os.path.join(scanBidsDir, bidsname + ".nii.gz"))
 
         # Create BIDS sidecar file from IMA XML
-        imaSessionURL = host + "/data/archive/experiments/%s/scans/%s" % (session, scanid)
+        imaSessionURL = host + "/data/archive/experiments/%s/scans/{scanid}" % (session, scanid)
         r = get(imaSessionURL, params={"format": "json"})
 
         # fields from ima json result
@@ -557,10 +556,12 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
             queryArgs = {}
             if workflowId is not None:
                 queryArgs["event_id"] = workflowId
-            r = sess.delete(host + "/data/experiments/%s/scans/%s/resources/NIFTI" % (session, scanid), params=queryArgs)
+            r = sess.delete(f"{session_url}/scans/{scanid}/resources/NIFTI",
+                            params=queryArgs)
             r.raise_for_status()
 
-            r = sess.delete(host + "/data/experiments/%s/scans/%s/resources/BIDS" % (session, scanid), params=queryArgs)
+            r = sess.delete(f"{session_url}/scans/{scanid}/resources/BIDS",
+                            params=queryArgs)
             r.raise_for_status()
         except (requests.ConnectionError, requests.exceptions.RequestException) as e:
             print("There was a problem deleting")
@@ -575,13 +576,16 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
         queryArgs["event_id"] = workflowId
     if uploadByRef:
         queryArgs["reference"] = os.path.abspath(scanImgDir)
-        r = sess.put(host + "/data/experiments/%s/scans/%s/resources/NIFTI/files" % (session, scanid), params=queryArgs)
+        r = sess.put(f"{session_url}/scans/{scanid}/resources/NIFTI/files",
+                     params=queryArgs)
     else:
         queryArgs["extract"] = True
         (t, tempFilePath) = tempfile.mkstemp(suffix='.zip')
-        zipdir(dirPath=os.path.abspath(scanImgDir), zipFilePath=tempFilePath, includeDirInZip=False)
+        zipdir(dirPath=os.path.abspath(scanImgDir), zipFilePath=tempFilePath,
+               includeDirInZip=False)
         files = {'file': open(tempFilePath, 'rb')}
-        r = sess.put(host + "/data/experiments/%s/scans/%s/resources/NIFTI/files" % (session, scanid), params=queryArgs, files=files)
+        r = sess.put(f"{session_url}/scans/{scanid}/resources/NIFTI/files",
+                     params=queryArgs, files=files)
         os.remove(tempFilePath)
     r.raise_for_status()
 
@@ -591,13 +595,16 @@ for scanid, seriesdesc in zip(reversed(scanIDList), reversed(seriesDescList)):
         queryArgs["event_id"] = workflowId
     if uploadByRef:
         queryArgs["reference"] = os.path.abspath(scanBidsDir)
-        r = sess.put(host + "/data/experiments/%s/scans/%s/resources/BIDS/files" % (session, scanid), params=queryArgs)
+        r = sess.put(f"{session_url}/scans/{scanid}/resources/BIDS/files",
+                     params=queryArgs)
     else:
         queryArgs["extract"] = True
         (t, tempFilePath) = tempfile.mkstemp(suffix='.zip')
-        zipdir(dirPath=os.path.abspath(scanBidsDir), zipFilePath=tempFilePath, includeDirInZip=False)
+        zipdir(dirPath=os.path.abspath(scanBidsDir), zipFilePath=tempFilePath,
+               includeDirInZip=False)
         files = {'file': open(tempFilePath, 'rb')}
-        r = sess.put(host + "/data/experiments/%s/scans/%s/resources/BIDS/files" % (session, scanid), params=queryArgs, files=files)
+        r = sess.put(f"{session_url}/scans/{scanid}/resources/BIDS/files",
+                     params=queryArgs, files=files)
         os.remove(tempFilePath)
     r.raise_for_status()
 
@@ -618,7 +625,7 @@ previouschanges = ""
 
 # Remove existing files if they are there
 print("Check for presence of session-level BIDS data")
-r = get(host + "/data/experiments/%s/resources" % session, params={"format": "json"})
+r = get(f"{session_url}/resources", params={"format": "json"})
 sessionResources = r.json()["ResultSet"]["Result"]
 print('Found resources %s.' % ', '.join(res["label"] for res in sessionResources))
 
@@ -629,7 +636,7 @@ if hasSessionBIDS:
     print("Session has preexisting BIDS resource. Deleting previous BIDS metadata if present.")
 
     # Consider making CHANGES a real, living changelog
-    # r = get( host + "/data/experiments/%s/resources/BIDS/files/CHANGES"%(session) )
+    # r = get( f"{session_url}/resources/BIDS/files/CHANGES"%(session) )
     # previouschanges = r.text
     # print previouschanges
 
@@ -638,7 +645,7 @@ if hasSessionBIDS:
         if workflowId is not None:
             queryArgs["event_id"] = workflowId
 
-        r = sess.delete(host + "/data/experiments/%s/resources/BIDS" % session, params=queryArgs)
+        r = sess.delete(f"{session_url}/resources/BIDS", params=queryArgs)
         r.raise_for_status()
         uploadSessionBids = True
     except (requests.ConnectionError, requests.exceptions.RequestException) as e:
@@ -652,7 +659,8 @@ if hasSessionBIDS:
 
 # Fetch metadata from project
 print("Fetching project {} metadata".format(project))
-rawprojectdata = get(host + "/data/projects/%s" % project, params={"format": "json"})
+rawprojectdata = get(host + "/data/projects/%s" % project,
+                     params={"format": "json"})
 projectdata = rawprojectdata.json()
 print("Got project metadata\n")
 
@@ -698,14 +706,15 @@ if invnames != []:
 # dataset_description['ReferencesAndLinks'] = None
 
 # Session identifier
-dataset_description['DatasetDOI'] = host + '/data/experiments/' + session
+dataset_description['DatasetDOI'] = session_url
 
 # Upload
 queryArgs = {"format": "BIDS", "content": "BIDS", "tags": "BIDS", "inbody": "true"}
 if workflowId is not None:
     queryArgs["event_id"] = workflowId
 
-r = sess.put(host + "/data/experiments/%s/resources/BIDS/files/dataset_description.json" % session, json=dataset_description, params=queryArgs)
+r = sess.put(f"{session_url}/resources/BIDS/files/dataset_description.json",
+             json=dataset_description, params=queryArgs)
 r.raise_for_status()
 
 # Generate CHANGES
@@ -713,7 +722,8 @@ changes = "1.0 " + time.strftime("%Y-%m-%d") + "\n\n - Initial release."
 
 # Upload
 h = {"content-type": "text/plain"}
-r = sess.put(host + "/data/experiments/%s/resources/BIDS/files/CHANGES" % session, data=changes, params=queryArgs, headers=h)
+r = sess.put(f"{session_url}/resources/BIDS/files/CHANGES",
+             data=changes, params=queryArgs, headers=h)
 r.raise_for_status()
 
 # All done
