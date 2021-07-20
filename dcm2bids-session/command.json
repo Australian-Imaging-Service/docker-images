@@ -1,11 +1,11 @@
 {
     "name": "dcm2bids-session",
     "description": "Runs dcm2niix on a session's scans, and uploads the nifti and bids json",
-    "version": "1.5.1",
+    "version": "1.0.4",
     "schema-version": "1.0",
     "type": "docker",
-    "image": "xnat/dcm2bids-session:1.5",
-    "command-line": "python dcm2bids_wholeSession.py #SESSION_ID# #OVERWRITE# --host $XNAT_HOST --user $XNAT_USER --pass $XNAT_PASS --upload-by-ref False --dicomdir /dicom --niftidir /nifti",
+    "image": "australianimagingservice/dcm2bids-session:1.0.2",
+    "command-line": "python dcm2bids_wholeSession.py #SESSION_ID# #PROJECT_ID# #OVERWRITE# --host $XNAT_HOST --user $XNAT_USER --pass $XNAT_PASS --upload-by-ref False --dicomdir /dicom --niftidir /nifti",
     "workdir": "/src",
     "override-entrypoint": true,
     "mounts": [
@@ -25,6 +25,14 @@
             "command-line-flag": "--session"
         },
         {
+            "name": "project_id",
+            "description": "XNAT ID of the project",
+            "type": "string",
+            "required": true,
+            "replacement-key": "#PROJECT_ID#",
+            "command-line-flag": "--project"
+        },
+        {
             "name": "overwrite",
             "description": "Overwrite any existing NIFTI and BIDS scan resources?",
             "type": "boolean",
@@ -39,8 +47,8 @@
     "outputs": [],
     "xnat": [
         {
-            "name": "dcm2bids-session-session",
-            "description": "Run dcm2niix-session on a Session",
+            "name": "dcm2bids-session",
+            "description": "Convert DICOM-to-NIfTI and generate BIDS metadata",
             "contexts": ["xnat:imageSessionData"],
             "external-inputs": [
                 {
@@ -57,7 +65,17 @@
                     "type": "string",
                     "derived-from-wrapper-input": "session",
                     "derived-from-xnat-object-property": "id",
+                    "user-settable": false,
                     "provides-value-for-command-input": "session_id"
+                },
+                {
+                    "name": "project",
+                    "type": "string",
+                    "derived-from-wrapper-input": "session",
+                    "derived-from-xnat-object-property": "project-id",
+                    "provides-value-for-command-input": "project_id",
+                    "user-settable": false,
+                    "required": true
                 }
             ],
             "output-handlers": []
