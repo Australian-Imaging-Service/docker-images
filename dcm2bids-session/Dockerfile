@@ -1,4 +1,4 @@
-FROM python:3.9
+FROM python:3.10.0b2
 LABEL maintainer=tom.g.close@gmail.com
 
 RUN apt-get update && apt-get install -y \
